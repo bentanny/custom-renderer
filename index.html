@@ -145,23 +145,12 @@
   <script>
     const root = document.getElementById('root');
 
-    // Log all messages for debugging
     window.addEventListener('message', (event) => {
-      console.log('[custom-renderer] message received:', JSON.stringify(event.data).slice(0, 500));
-
-      const payload = event.data || {};
-      const { type, data, metadata } = payload;
-
-      // Accept if we have type + data, or just render whatever we get
-      if (!type && !data) return;
-
-      const outputData = data || {};
+      const { type, data, metadata } = event.data || {};
+      if (!data) return;
 
       root.className = '';
       root.innerHTML = '';
-
-      // Alias for rest of the code
-      var data = outputData;
 
       // Badge showing output vs reference
       const badge = document.createElement('div');

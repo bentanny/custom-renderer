@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Custom Output Renderer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #fff;
+      color: #1a1a1a;
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 200px;
+      color: #888;
+      font-style: italic;
+    }
+
+    .section { margin-bottom: 16px; }
+    .section:last-child { margin-bottom: 0; }
+
+    .section-header {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #666;
+      margin-bottom: 6px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid #eee;
+    }
+
+    /* Chat messages */
+    .message {
+      padding: 10px 14px;
+      border-radius: 12px;
+      margin-bottom: 8px;
+      max-width: 85%;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .message.human {
+      background: #e8f0fe;
+      color: #1a3a5c;
+      margin-left: auto;
+      border-bottom-right-radius: 4px;
+    }
+    .message.ai {
+      background: #f3f4f6;
+      color: #1a1a1a;
+      border-bottom-left-radius: 4px;
+    }
+    .message.system {
+      background: #fef3c7;
+      color: #78350f;
+      font-size: 13px;
+      max-width: 100%;
+      text-align: center;
+      border-radius: 8px;
+    }
+    .message .role {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 4px;
+      opacity: 0.7;
+    }
+
+    /* Tool calls */
+    .tool-call {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 8px;
+    }
+    .tool-call .tool-name {
+      font-weight: 600;
+      color: #166534;
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .tool-call pre {
+      background: #ecfdf5;
+      padding: 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      overflow-x: auto;
+    }
+
+    /* Generic key-value output */
+    .kv-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .kv-table td {
+      padding: 6px 10px;
+      border-bottom: 1px solid #f0f0f0;
+      vertical-align: top;
+    }
+    .kv-table td:first-child {
+      font-weight: 600;
+      color: #555;
+      white-space: nowrap;
+      width: 1%;
+    }
+    .kv-table td:last-child {
+      word-break: break-word;
+    }
+
+    /* Raw JSON fallback */
+    pre.raw-json {
+      background: #f8f8f8;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge.output { background: #dbeafe; color: #1e40af; }
+    .badge.reference { background: #fce7f3; color: #9d174d; }
+  </style>
+</head>
+<body>
+  <div id="root" class="empty-state">Waiting for data…</div>
+
+  <script>
+    const root = document.getElementById('root');
+
+    window.addEventListener('message', (event) => {
+      const { type, data, metadata } = event.data || {};
+      if (!data) return;
+
+      root.className = '';
+      root.innerHTML = '';
+
+      // Badge showing output vs reference
+      const badge = document.createElement('div');
+      badge.style.marginBottom = '12px';
+      badge.innerHTML = `<span class="badge ${type}">${type === 'reference' ? '📋 Reference Output' : '🤖 Model Output'}</span>`;
+      root.appendChild(badge);
+
+      // Try to detect chat messages (LangChain LLM output format)
+      const messages = extractMessages(data);
+      if (messages.length > 0) {
+        renderChatMessages(messages);
+        return;
+      }
+
+      // Try to detect tool calls
+      const toolCalls = extractToolCalls(data);
+      if (toolCalls.length > 0) {
+        renderToolCalls(toolCalls);
+        return;
+      }
+
+      // Simple string output
+      if (typeof data === 'object' && Object.keys(data).length === 1 && typeof Object.values(data)[0] === 'string') {
+        renderSimpleText(Object.keys(data)[0], Object.values(data)[0]);
+        return;
+      }
+
+      // Key-value pairs (flat object)
+      if (typeof data === 'object' && !Array.isArray(data) && Object.values(data).every(v => typeof v !== 'object' || v === null)) {
+        renderKeyValue(data);
+        return;
+      }
+
+      // Fallback: pretty-printed JSON
+      renderRawJSON(data);
+    });
+
+    function extractMessages(data) {
+      // LangChain chat model output: { messages: [...] } or { output: { messages: [...] } }
+      const candidates = [
+        data?.messages,
+        data?.output?.messages,
+        data?.output?.chat_history,
+        data?.chat_history,
+      ];
+      for (const c of candidates) {
+        if (Array.isArray(c) && c.length > 0 && c[0]?.content !== undefined) return c;
+      }
+      // Single message in output
+      if (data?.content !== undefined && (data?.role || data?.type)) {
+        return [data];
+      }
+      return [];
+    }
+
+    function extractToolCalls(data) {
+      const calls = data?.tool_calls || data?.output?.tool_calls || [];
+      if (Array.isArray(calls) && calls.length > 0 && calls[0]?.name) return calls;
+      return [];
+    }
+
+    function renderChatMessages(messages) {
+      const section = makeSection('Conversation');
+      messages.forEach(msg => {
+        const role = msg.role || msg.type || 'unknown';
+        const div = document.createElement('div');
+        const roleClass = role === 'human' || role === 'user' ? 'human'
+          : role === 'system' ? 'system' : 'ai';
+        div.className = `message ${roleClass}`;
+
+        const roleLabel = document.createElement('div');
+        roleLabel.className = 'role';
+        roleLabel.textContent = role;
+        div.appendChild(roleLabel);
+
+        const content = document.createElement('div');
+        // Handle string or array content (multimodal)
+        if (typeof msg.content === 'string') {
+          content.textContent = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          content.textContent = msg.content
+            .filter(c => c.type === 'text')
+            .map(c => c.text)
+            .join('\n');
+        } else {
+          content.textContent = JSON.stringify(msg.content, null, 2);
+        }
+        div.appendChild(content);
+
+        // Inline tool calls on AI messages
+        if (msg.tool_calls?.length) {
+          msg.tool_calls.forEach(tc => {
+            const tcDiv = document.createElement('div');
+            tcDiv.className = 'tool-call';
+            tcDiv.style.marginTop = '8px';
+            tcDiv.innerHTML = `
+              <div class="tool-name">🔧 ${esc(tc.name)}</div>
+              <pre>${esc(JSON.stringify(tc.args || tc.input, null, 2))}</pre>
+            `;
+            div.appendChild(tcDiv);
+          });
+        }
+
+        section.appendChild(div);
+      });
+      root.appendChild(section);
+    }
+
+    function renderToolCalls(calls) {
+      const section = makeSection('Tool Calls');
+      calls.forEach(tc => {
+        const div = document.createElement('div');
+        div.className = 'tool-call';
+        div.innerHTML = `
+          <div class="tool-name">🔧 ${esc(tc.name)}</div>
+          <pre>${esc(JSON.stringify(tc.args || tc.input, null, 2))}</pre>
+        `;
+        section.appendChild(div);
+      });
+      root.appendChild(section);
+    }
+
+    function renderSimpleText(key, value) {
+      const section = makeSection(key);
+      const p = document.createElement('div');
+      p.style.whiteSpace = 'pre-wrap';
+      p.style.wordBreak = 'break-word';
+      p.textContent = value;
+      section.appendChild(p);
+      root.appendChild(section);
+    }
+
+    function renderKeyValue(data) {
+      const section = makeSection('Output');
+      const table = document.createElement('table');
+      table.className = 'kv-table';
+      for (const [k, v] of Object.entries(data)) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${esc(k)}</td><td>${esc(String(v ?? ''))}</td>`;
+        table.appendChild(tr);
+      }
+      section.appendChild(table);
+      root.appendChild(section);
+    }
+
+    function renderRawJSON(data) {
+      const section = makeSection('Output (JSON)');
+      const pre = document.createElement('pre');
+      pre.className = 'raw-json';
+      pre.textContent = JSON.stringify(data, null, 2);
+      section.appendChild(pre);
+      root.appendChild(section);
+    }
+
+    function makeSection(title) {
+      const div = document.createElement('div');
+      div.className = 'section';
+      const header = document.createElement('div');
+      header.className = 'section-header';
+      header.textContent = title;
+      div.appendChild(header);
+      return div;
+    }
+
+    function esc(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>
